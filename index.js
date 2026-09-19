@@ -4,6 +4,7 @@
 
 import readline from 'readline';
 import fs from 'fs';
+import { createFlappyGame } from './flappy.js';
 import { createDinoGame } from './dino.js';
 
 // --- High Scores (Persistent in local scores.json) ---
@@ -24,7 +25,7 @@ function saveScores() {
 
 // --- Application State ---
 let state = 'MENU';           // 'MENU' | 'PLAYING' | 'GAMEOVER'
-let currentGameId = null;     // 'dino'
+let currentGameId = null;     // 'flappy' | 'dino'
 let currentGameName = '';     // Display name
 let activeGame = null;        // Active game instance
 let lastScore = 0;            // Last game score
@@ -66,12 +67,12 @@ function renderMenu() {
     '|      TERMINAL ARCADE HUB       |',
     '+--------------------------------+',
     '|                                |',
-    `|  1. Flappy Bird (Coming Soon)  |`,
+    `|  1. Flappy Bird (High: ${String(highScores.flappy || 0).padEnd(4)})   |`,
     `|  2. Dino Runner (High: ${String(highScores.dino || 0).padEnd(4)})   |`,
     '|  Q. Quit                       |',
     '|                                |',
     '+--------------------------------+',
-    ' Select [2] to play Dino | [Q] to quit'
+    ' Select [1] or [2] to play | [Q] to quit'
   ];
   return lines.join('\n');
 }
@@ -102,7 +103,9 @@ process.stdin.on('keypress', (str, key) => {
   const keyName = key ? key.name : str;
 
   if (state === 'MENU') {
-    if (str === '2') {
+    if (str === '1') {
+      startGame('flappy', 'Flappy Bird', createFlappyGame);
+    } else if (str === '2') {
       startGame('dino', 'Dino Runner', createDinoGame);
     } else if (str === 'q' || str === 'Q') {
       cleanupAndExit();
