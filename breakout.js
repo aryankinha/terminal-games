@@ -1,31 +1,37 @@
-// breakout.js - Minimalistic Classic Breakout for Terminal
+// breakout.js - Minimalistic Classic Breakout with 3 lives, realistic side-bounces, and ANSI colors
+
+import { C, createEmptyGrid, wrapFrame, createCountdown, clamp } from './common.js';
 
 export function createBreakoutGame() {
   const width = 50;               // Playfield width
   const height = 14;              // Playfield height
   const paddleW = 8;              // Paddle width in characters
   const paddleY = height - 2;     // Fixed paddle row (row 12)
-  const countdownDuration = 3000; // 3-second countdown before ball launches
+  const countdown = createCountdown(3000);
 
   let paddleX = Math.floor((width - paddleW) / 2); // Centered paddle
   let ballX = 25;                 // Ball X coordinate
-  let ballY = paddleY - 1;        // Ball Y coordinate (rests above paddle)
+  let ballY = paddleY - 1;        // Ball Y coordinate
   let vx = 0.7;                   // Horizontal velocity
-  let vy = -0.45;                 // Vertical velocity (scaled for terminal aspect ratio)
+  let vy = -0.45;                 // Vertical velocity
   let score = 0;                  // Score
+  let lives = 3;                  // 3 Lives system
   let gameOver = false;           // Game over flag
-  const startTime = Date.now();   // Countdown timer start
 
-  // Initialize 3 rows of bricks (9 bricks per row = 27 bricks)
+  // 3 rows of bricks (9 bricks per row = 27 bricks)
   let bricks = [];
   function initBricks() {
     bricks = [];
     for (let row = 1; row <= 3; row++) {
+      const color = (row === 1) ? C.brightRed : (row === 2 ? C.brightYellow : C.brightCyan);
+      const points = (row === 1) ? 15 : (row === 2 ? 10 : 5);
       for (let b = 0; b < 9; b++) {
         bricks.push({
-          x: 3 + b * 5, // 4-char brick + 1 space
+          x: 3 + b * 5, // 4-char brick + 1 space gap
           y: row,
           w: 4,
+          color,
+          points,
           alive: true
         });
       }
@@ -33,15 +39,14 @@ export function createBreakoutGame() {
   }
   initBricks();
 
-  // Check if currently in 3-second countdown
-  function isCountingDown() {
-    return (Date.now() - startTime) < countdownDuration;
-  }
-
-  // Remaining seconds for countdown (3, 2, 1)
-  function getRemainingSeconds() {
-    const elapsed = Date.now() - startTime;
-    return Math.max(1, Math.ceil((countdownDuration - elapsed) / 1000));
+  // Reset ball position onto paddle with a quick 2-second serve countdown
+  function resetBall() {
+    paddleX = Math.floor((width - paddleW) / 2);
+    ballX = paddleX + Math.floor(paddleW / 2);
+    ballY = paddleY - 1;
+    vx = (Math.random() < 0.5 ? 1 : -1) * 0.7;
+    vy = -0.45;
+    countdown.start(2000);
   }
 
   // Handle steering inputs (Arrow keys or A/D)
@@ -60,11 +65,14 @@ export function createBreakoutGame() {
     if (gameOver) return;
 
     // During countdown, keep ball on the paddle
-    if (isCountingDown()) {
+    if (countdown.isActive()) {
       ballX = paddleX + Math.floor(paddleW / 2);
       ballY = paddleY - 1;
       return;
     }
+
+    const prevX = ballX;
+    const prevY = ballY;
 
     // Move ball
     ballX += vx;
@@ -86,7 +94,7 @@ export function createBreakoutGame() {
     }
 
     // Paddle collision
-    if (ballY >= paddleY - 0.6 && ballY <= paddleY + 0.4 && vy > 0) {
+    if (ballY >= paddleY - 0.6 && ballY <= paddleY + 0.5 && vy > 0) {
       if (ballX >= paddleX - 0.5 && ballX <= paddleX + paddleW + 0.5) {
         vy = -Math.abs(vy);
 
@@ -97,14 +105,21 @@ export function createBreakoutGame() {
       }
     }
 
-    // Brick collision check
+    // Brick collision check with realistic side-impact vs vertical bounce
     const rBallY = Math.round(ballY);
     for (const brick of bricks) {
       if (brick.alive) {
         if (rBallY === brick.y && ballX >= brick.x - 0.5 && ballX <= brick.x + brick.w + 0.5) {
           brick.alive = false;
-          score += 10;
-          vy = -vy; // Reverse vertical direction
+          score += brick.points;
+
+          // Check if ball hit the side or top/bottom of the brick
+          const wasOutsideX = prevX < brick.x || prevX > brick.x + brick.w;
+          if (wasOutsideX) {
+            vx = -vx;
+          } else {
+            vy = -vy;
+          }
           break;
         }
       }
@@ -114,71 +129,63 @@ export function createBreakoutGame() {
     const aliveCount = bricks.filter(b => b.alive).length;
     if (aliveCount === 0) {
       score += 50;
-      initBricks(); // Respawn bricks
-      // Slight speed boost
+      initBricks();
+      resetBall();
+      // Progressive speed boost
       vx *= 1.1;
       vy = -Math.abs(vy) * 1.1;
     }
 
-    // Ball fell below screen -> Game Over
+    // Ball fell below screen -> lose life
     if (ballY >= height) {
-      gameOver = true;
+      lives--;
+      if (lives > 0) {
+        resetBall();
+      } else {
+        gameOver = true;
+      }
     }
   }
 
   // Render current frame
   function render() {
-    const grid = [];
-    for (let y = 0; y < height; y++) {
-      grid[y] = new Array(width).fill(' ');
-    }
+    const grid = createEmptyGrid(width, height);
 
-    // Draw bricks
+    // Draw bricks with their respective row colors
     for (const brick of bricks) {
       if (brick.alive) {
-        grid[brick.y][brick.x] = '[';
+        grid[brick.y][brick.x] = `${brick.color}[`;
         grid[brick.y][brick.x + 1] = '#';
         grid[brick.y][brick.x + 2] = '#';
-        grid[brick.y][brick.x + 3] = ']';
+        grid[brick.y][brick.x + 3] = `]${C.reset}`;
       }
     }
 
     // Draw paddle
     for (let i = 0; i < paddleW; i++) {
-      grid[paddleY][paddleX + i] = '=';
+      grid[paddleY][paddleX + i] = `${C.bold}${C.white}=${C.reset}`;
     }
 
-    // Draw ball (O)
-    const rX = Math.max(0, Math.min(width - 1, Math.round(ballX)));
-    const rY = Math.max(0, Math.min(height - 1, Math.round(ballY)));
-    grid[rY][rX] = 'O';
+    // Draw ball (O) in bright bold white
+    const rX = clamp(Math.round(ballX), 0, width - 1);
+    const rY = clamp(Math.round(ballY), 0, height - 1);
+    grid[rY][rX] = `${C.bold}${C.brightWhite}O${C.reset}`;
 
     // Countdown overlay
+    countdown.overlay(grid, width, 6);
+
     let statusText = '';
     const aliveCount = bricks.filter(b => b.alive).length;
+    const hearts = `${C.brightRed}${'♥ '.repeat(lives)}${C.gray}${'♡ '.repeat(Math.max(0, 3 - lives))}${C.reset}`;
 
-    if (isCountingDown()) {
-      const remaining = getRemainingSeconds();
-      const message = `Starting in ${remaining}...`;
-      const startCol = Math.floor((width - message.length) / 2);
-      for (let i = 0; i < message.length; i++) {
-        grid[6][startCol + i] = message[i];
-      }
-      statusText = ` Score: 0  |  Starting in ${remaining}...  |  [Q] Menu`;
+    if (countdown.isActive()) {
+      const remaining = countdown.getSecondsRemaining();
+      statusText = ` ${C.yellow}Score: ${score}${C.reset}  |  Lives: ${hearts} |  ${C.bold}Starting in ${remaining}...${C.reset}  |  ${C.gray}[Q] Menu${C.reset}`;
     } else {
-      statusText = ` Score: ${score}  |  Bricks: ${aliveCount}  |  [←/→, A/D] Move  |  [Q] Menu`;
+      statusText = ` ${C.yellow}Score: ${score}${C.reset}  |  Lives: ${hearts} |  ${C.brightCyan}[←/→, A/D] Move${C.reset}  |  ${C.gray}[Q] Menu${C.reset}`;
     }
 
-    // Add borders
-    const border = '+' + '-'.repeat(width) + '+';
-    const lines = grid.map(row => '|' + row.join('') + '|');
-
-    return [
-      border,
-      ...lines,
-      border,
-      statusText
-    ].join('\n');
+    return wrapFrame(grid, width, statusText, C.cyan);
   }
 
   return {
