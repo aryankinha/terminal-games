@@ -1,16 +1,20 @@
 #!/usr/bin/env node
 
-// index.js - Terminal Arcade Hub Launcher
+// index.js - Terminal Arcade Hub Launcher with ANSI styling, resize guardian, and robust signal handling
 
 import readline from 'readline';
 import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { C } from './common.js';
 import { createFlappyGame } from './flappy.js';
 import { createDinoGame } from './dino.js';
 import { createSnakeGame } from './snake.js';
 import { createBreakoutGame } from './breakout.js';
 
-// --- High Scores (Persistent in local scores.json) ---
-const SCORES_FILE = './scores.json';
+// --- High Scores (Persistent in local scores.json relative to module) ---
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const SCORES_FILE = path.join(__dirname, 'scores.json');
 let highScores = { flappy: 0, dino: 0, snake: 0, breakout: 0 };
 
 try {
@@ -19,7 +23,7 @@ try {
     highScores = { ...highScores, ...loaded };
   }
 } catch (e) {
-  // If file doesn't exist or is invalid, use defaults
+  // If file doesn't exist or is invalid, fallback to defaults
 }
 
 function saveScores() {
@@ -34,8 +38,10 @@ let currentGameId = null;     // 'flappy' | 'dino' | 'snake' | 'breakout'
 let currentGameName = '';     // Display name
 let activeGame = null;        // Active game instance
 let lastScore = 0;            // Last game score
+let isNewHighScore = false;   // Flashes new high score banner on game over
 let gameOverTimestamp = 0;    // Prevent accidental keypress skips on game over
 let selectedMenuIndex = 0;    // Interactive menu slide bar (0..4)
+let loopTimer = null;         // Reference to engine loop timer
 
 // --- Terminal & Raw Input Setup ---
 readline.emitKeypressEvents(process.stdin);
@@ -46,28 +52,64 @@ process.stdout.write('\x1b[?25l'); // Hide cursor
 
 // Cleanly restore terminal on exit
 function cleanupAndExit() {
-  process.stdout.write('\x1b[?25h'); // Restore cursor
+  if (loopTimer) clearTimeout(loopTimer);
+  process.stdout.write('\x1b[?25h');    // Restore cursor
   process.stdout.write('\x1b[2J\x1b[H'); // Clear screen
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(false);
   }
-  process.exit();
+  process.exit(0);
 }
 
-// Catch unexpected errors to prevent silent exit
+// OS Signal traps and exit handlers to guarantee cursor is always restored
+process.on('SIGINT', cleanupAndExit);
+process.on('SIGTERM', cleanupAndExit);
+process.on('exit', () => {
+  process.stdout.write('\x1b[?25h');
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(false);
+  }
+});
+
+// Catch unexpected errors to prevent silent crash and restore terminal
 process.on('uncaughtException', (err) => {
   process.stdout.write('\x1b[?25h\n');
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(false);
   }
-  console.error('An error occurred:', err);
+  console.error('An unexpected error occurred:', err);
   process.exit(1);
 });
+
+// Terminal Resize Guardian: clear screen on resize to prevent wrapping
+process.stdout.on('resize', () => {
+  process.stdout.write('\x1b[2J\x1b[H');
+});
+
+function isTerminalTooSmall() {
+  const cols = process.stdout.columns || 80;
+  const rows = process.stdout.rows || 24;
+  return cols < 52 || rows < 16;
+}
+
+function renderResizeWarning() {
+  const lines = [
+    `${C.brightRed}+--------------------------------------------------+${C.reset}`,
+    `|${C.bold}${C.brightYellow}            TERMINAL WINDOW TOO SMALL             ${C.reset}|`,
+    `${C.brightRed}+--------------------------------------------------+${C.reset}`,
+    '|                                                  |',
+    '|   Please resize window to at least 52x16 cols    |',
+    '|                                                  |',
+    `${C.brightRed}+--------------------------------------------------+${C.reset}`
+  ];
+  return lines.join('\n');
+}
 
 // Start a chosen game
 function startGame(id, name, gameFactory) {
   currentGameId = id;
   currentGameName = name;
+  isNewHighScore = false;
   activeGame = gameFactory();
   state = 'PLAYING';
   process.stdout.write('\x1b[2J\x1b[H'); // Clean screen before game begins
@@ -91,18 +133,20 @@ function formatMenuItem(idx, title, extra = '') {
 
   if (isSelected) {
     // Reverse video creates a filled, highlighted selection bar
-    return '| \x1b[7m' + rawText + '\x1b[0m |';
+    return `${C.brightCyan}|${C.reset} ${C.reverse}${C.bold}${rawText}${C.reset} ${C.brightCyan}|${C.reset}`;
   } else {
-    return '| ' + rawText + ' |';
+    return `${C.brightCyan}|${C.reset} ${rawText} ${C.brightCyan}|${C.reset}`;
   }
 }
 
 // Main Menu Screen (width 50)
 function renderMenu() {
+  const border = `${C.brightCyan}+${'-'.repeat(50)}+${C.reset}`;
+
   const lines = [
-    '+--------------------------------------------------+',
-    '|               TERMINAL ARCADE HUB                |',
-    '+--------------------------------------------------+',
+    border,
+    `|${C.bold}${C.brightYellow}               TERMINAL ARCADE HUB                ${C.reset}|`,
+    border,
     '|                                                  |',
     formatMenuItem(0, '1. Flappy Bird', `(High: ${highScores.flappy || 0})`),
     formatMenuItem(1, '2. Dino Runner', `(High: ${highScores.dino || 0})`),
@@ -110,25 +154,33 @@ function renderMenu() {
     formatMenuItem(3, '4. Breakout',    `(High: ${highScores.breakout || 0})`),
     formatMenuItem(4, 'Q. Quit'),
     '|                                                  |',
-    '+--------------------------------------------------+',
-    '  [↑/↓] Slide  |  [ENTER/SPACE] Select  |  [Q] Quit'
+    border,
+    `  ${C.brightCyan}[↑/↓, W/S]${C.reset} Slide  |  ${C.brightCyan}[ENTER/SPACE]${C.reset} Play  |  ${C.gray}[Q]${C.reset} Quit`
   ];
   return lines.join('\n');
 }
 
 // Game Over Screen (width 50)
 function renderGameOver() {
+  const border = `${C.brightCyan}+${'-'.repeat(50)}+${C.reset}`;
+  const bannerText = '* * *   NEW HIGH SCORE!   * * *';
+  const paddedBanner = bannerText.padStart(Math.floor((48 + bannerText.length) / 2)).padEnd(48);
+
+  const bannerLine = isNewHighScore
+    ? `| ${C.bold}${C.brightYellow}${paddedBanner}${C.reset} |`
+    : `|                                                  |`;
+
   const lines = [
-    '+--------------------------------------------------+',
-    '|                    GAME OVER!                    |',
-    '+--------------------------------------------------+',
-    '|                                                  |',
+    border,
+    `|${C.bold}${C.brightRed}                    GAME OVER!                    ${C.reset}|`,
+    border,
+    bannerLine,
     `|   Game:        ${currentGameName.padEnd(33)} |`,
     `|   Final Score: ${String(lastScore).padEnd(33)} |`,
     `|   High Score:  ${String(highScores[currentGameId] || 0).padEnd(33)} |`,
     '|                                                  |',
-    '+--------------------------------------------------+',
-    '  [SPACE/ENTER] Play Again  |  [Q/M/ESC] Menu'
+    border,
+    `  ${C.brightCyan}[SPACE/ENTER] Play Again${C.reset}  |  ${C.gray}[Q/M/ESC] Menu${C.reset}`
   ];
   return lines.join('\n');
 }
@@ -208,6 +260,12 @@ process.stdin.on('keypress', (str, key) => {
 function runLoop() {
   let delay = 75;
 
+  if (isTerminalTooSmall()) {
+    process.stdout.write('\x1b[H' + renderResizeWarning() + '\n');
+    loopTimer = setTimeout(runLoop, 250);
+    return;
+  }
+
   if (state === 'MENU') {
     process.stdout.write('\x1b[H' + renderMenu() + '\n');
   } else if (state === 'PLAYING' && activeGame) {
@@ -216,9 +274,13 @@ function runLoop() {
 
     if (activeGame.isGameOver()) {
       lastScore = activeGame.getScore();
-      if (lastScore > (highScores[currentGameId] || 0)) {
+      const previousHigh = highScores[currentGameId] || 0;
+      if (lastScore > previousHigh) {
         highScores[currentGameId] = lastScore;
         saveScores();
+        isNewHighScore = true;
+      } else {
+        isNewHighScore = false;
       }
       state = 'GAMEOVER';
       gameOverTimestamp = Date.now();
@@ -230,7 +292,7 @@ function runLoop() {
     process.stdout.write('\x1b[H' + renderGameOver() + '\n');
   }
 
-  setTimeout(runLoop, delay);
+  loopTimer = setTimeout(runLoop, delay);
 }
 
 runLoop();
