@@ -1,10 +1,12 @@
-// flappy.js - Minimalistic Flappy Bird for Terminal
+// flappy.js - Minimalistic Flappy Bird for Terminal with ANSI colors
+
+import { C, createEmptyGrid, wrapFrame, createCountdown, clamp } from './common.js';
 
 export function createFlappyGame() {
   const width = 50;            // Screen width in characters (wide playfield)
   const height = 14;           // Screen height in characters
   const birdX = 8;             // Fixed horizontal position of the bird
-  const countdownDuration = 3000; // 3-second countdown before game starts
+  const countdown = createCountdown(3000);
 
   let birdY = 6;               // Vertical position of the bird
   let velocity = 0;            // Vertical velocity
@@ -12,23 +14,11 @@ export function createFlappyGame() {
   let score = 0;               // Current score
   let gameOver = false;        // Game over flag
   let tick = 0;                // Frame counter for spawning pipes
-  const startTime = Date.now();// Timestamp when game session was created
-
-  // Check if still within the 3-second countdown
-  function isCountingDown() {
-    return (Date.now() - startTime) < countdownDuration;
-  }
-
-  // Get current remaining seconds for countdown (3, 2, 1)
-  function getRemainingSeconds() {
-    const elapsed = Date.now() - startTime;
-    return Math.max(1, Math.ceil((countdownDuration - elapsed) / 1000));
-  }
 
   // Handle player inputs (Space or Up arrow to flap)
   function handleInput(key, str) {
     // Only accept flap inputs once countdown has finished
-    if (isCountingDown()) return;
+    if (countdown.isActive()) return;
 
     const isJump = (key && (key.name === 'space' || key.name === 'up')) || str === ' ' || str === '\u0020';
     if (isJump) {
@@ -41,17 +31,17 @@ export function createFlappyGame() {
     if (gameOver) return;
 
     // Pause physics and obstacles during the 3-second countdown
-    if (isCountingDown()) return;
+    if (countdown.isActive()) return;
 
     // Apply gentle gravity with clamped terminal velocity
     velocity += 0.15;
     if (velocity > 0.75) velocity = 0.75;
     birdY += velocity;
 
-    // Ceiling soft-clamp: player cannot fly above screen, but touching ceiling does not kill
+    // Ceiling soft-clamp: player cannot fly above screen, rebounds gently
     if (birdY < 0) {
       birdY = 0;
-      velocity = 0;
+      velocity = 0.1;
     }
 
     // Spawn pipes every 22 ticks with a generous gap (5 rows)
@@ -94,53 +84,37 @@ export function createFlappyGame() {
     }
   }
 
-  // Render the current game frame as an ASCII string
+  // Render the current game frame as an ASCII string with ANSI colors
   function render() {
-    // Initialize empty grid
-    const grid = [];
-    for (let y = 0; y < height; y++) {
-      grid[y] = new Array(width).fill(' ');
-    }
+    const grid = createEmptyGrid(width, height);
 
-    // Draw pipes
+    // Draw pipes (vibrant green)
     for (const pipe of pipes) {
       if (pipe.x >= 0 && pipe.x < width) {
         for (let y = 0; y < height; y++) {
           if (y < pipe.gapY || y >= pipe.gapY + pipe.gapSize) {
-            grid[y][pipe.x] = '#';
+            grid[y][pipe.x] = `${C.brightGreen}#${C.reset}`;
           }
         }
       }
     }
 
-    // Draw bird (clamped within visual area)
-    const renderY = Math.max(0, Math.min(height - 1, Math.round(birdY)));
-    grid[renderY][birdX] = '>';
+    // Draw bird (bright yellow bold)
+    const renderY = clamp(Math.round(birdY), 0, height - 1);
+    grid[renderY][birdX] = `${C.bold}${C.brightYellow}>${C.reset}`;
 
-    // Overlay 3-second countdown message if counting down
+    // Overlay countdown message if still in pre-game countdown
+    countdown.overlay(grid, width, 4);
+
     let statusText = '';
-    if (isCountingDown()) {
-      const remaining = getRemainingSeconds();
-      const message = `Starting in ${remaining}...`;
-      const startCol = Math.floor((width - message.length) / 2);
-      for (let i = 0; i < message.length; i++) {
-        grid[4][startCol + i] = message[i];
-      }
-      statusText = ` Score: 0  |  Starting in ${remaining}...  |  [Q] Menu`;
+    if (countdown.isActive()) {
+      const remaining = countdown.getSecondsRemaining();
+      statusText = ` ${C.yellow}Score: 0${C.reset}  |  ${C.bold}Starting in ${remaining}...${C.reset}  |  ${C.gray}[Q] Menu${C.reset}`;
     } else {
-      statusText = ` Score: ${score}  |  [SPACE/UP] Flap  |  [Q] Menu`;
+      statusText = ` ${C.yellow}Score: ${score}${C.reset}  |  ${C.brightCyan}[SPACE/UP] Flap${C.reset}  |  ${C.gray}[Q] Menu${C.reset}`;
     }
 
-    // Add borders
-    const border = '+' + '-'.repeat(width) + '+';
-    const lines = grid.map(row => '|' + row.join('') + '|');
-
-    return [
-      border,
-      ...lines,
-      border,
-      statusText
-    ].join('\n');
+    return wrapFrame(grid, width, statusText, C.cyan);
   }
 
   return {
