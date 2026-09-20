@@ -1,9 +1,11 @@
-// snake.js - Minimalistic Classic Snake for Terminal
+// snake.js - Minimalistic Classic Snake for Terminal with input queue and ANSI colors
+
+import { C, createEmptyGrid, wrapFrame, createCountdown, clamp } from './common.js';
 
 export function createSnakeGame() {
-  const width = 50;               // Grid width (matching 50 characters)
+  const width = 50;               // Grid width
   const height = 14;              // Grid height
-  const countdownDuration = 3000; // 3-second countdown before snake starts moving
+  const countdown = createCountdown(3000);
 
   // Snake body initialized at center moving right
   let snake = [
@@ -13,85 +15,95 @@ export function createSnakeGame() {
   ];
 
   let dir = { dx: 1, dy: 0 };      // Current moving direction
-  let nextDir = { dx: 1, dy: 0 };  // Buffered next direction
-  let food = spawnFood();          // Current apple position
-  let bomb = spawnBomb();          // Hazard bomb position
+  let inputQueue = [];             // 2-step input buffer for snappy, drop-free turns
+  let food = null;
+  let bomb = null;
   let score = 0;                   // Apples eaten score
   let gameOver = false;            // Game over flag
-  let vTick = 0;                   // Vertical tick counter to balance vertical vs horizontal speed
-  const startTime = Date.now();   // Session start timestamp for countdown
+  let vTick = 0;                   // Vertical tick balancer
 
-  // Spawn apple at a random position not occupied by the snake
+  // Get all empty coordinates not occupied by snake, food, or bomb
+  function getEmptyCells(excludeFood = true, excludeBomb = true) {
+    const occupied = new Set();
+    for (const seg of snake) {
+      occupied.add(`${seg.x},${seg.y}`);
+    }
+    if (excludeFood && food) occupied.add(`${food.x},${food.y}`);
+    if (excludeBomb && bomb) occupied.add(`${bomb.x},${bomb.y}`);
+
+    const free = [];
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        if (!occupied.has(`${x},${y}`)) {
+          free.push({ x, y });
+        }
+      }
+    }
+    return free;
+  }
+
+  // Spawn apple safely in an unoccupied cell
   function spawnFood() {
-    let newFood;
-    while (true) {
-      newFood = {
-        x: Math.floor(Math.random() * (width - 2)) + 1,
-        y: Math.floor(Math.random() * (height - 2)) + 1
-      };
-      const collision = snake.some(seg => seg.x === newFood.x && seg.y === newFood.y);
-      if (!collision) break;
-    }
-    return newFood;
+    const free = getEmptyCells(false, true);
+    if (free.length === 0) return null;
+    return free[Math.floor(Math.random() * free.length)];
   }
 
-  // Spawn bomb at a random position away from snake and food
+  // Spawn hazard bomb safely away from snake head (at least 4 steps away)
   function spawnBomb() {
-    let newBomb;
-    while (true) {
-      newBomb = {
-        x: Math.floor(Math.random() * (width - 2)) + 1,
-        y: Math.floor(Math.random() * (height - 2)) + 1
-      };
-      const onSnake = snake.some(seg => seg.x === newBomb.x && seg.y === newBomb.y);
-      const onFood = (food && food.x === newBomb.x && food.y === newBomb.y);
-      if (!onSnake && !onFood) break;
-    }
-    return newBomb;
+    const free = getEmptyCells(true, false);
+    if (free.length === 0) return null;
+
+    const head = snake[0];
+    const safeCells = free.filter(c => Math.abs(c.x - head.x) + Math.abs(c.y - head.y) >= 4);
+    const pool = safeCells.length > 0 ? safeCells : free;
+    return pool[Math.floor(Math.random() * pool.length)];
   }
 
-  // Check if still in initial 3-second countdown
-  function isCountingDown() {
-    return (Date.now() - startTime) < countdownDuration;
-  }
+  food = spawnFood();
+  bomb = spawnBomb();
 
-  // Remaining seconds (3, 2, 1)
-  function getRemainingSeconds() {
-    const elapsed = Date.now() - startTime;
-    return Math.max(1, Math.ceil((countdownDuration - elapsed) / 1000));
-  }
-
-  // Handle steering inputs (Arrow keys or WASD)
+  // Handle steering inputs (Arrow keys or WASD) with 2-step buffering
   function handleInput(key, str) {
     const keyName = key ? key.name : str;
+    let req = null;
 
     if (keyName === 'up' || str === 'w' || str === 'W') {
-      if (dir.dy === 0) {
-        nextDir = { dx: 0, dy: -1 };
-        vTick = 0; // Immediate response on vertical turn
-      }
+      req = { dx: 0, dy: -1 };
     } else if (keyName === 'down' || str === 's' || str === 'S') {
-      if (dir.dy === 0) {
-        nextDir = { dx: 0, dy: 1 };
-        vTick = 0; // Immediate response on vertical turn
-      }
+      req = { dx: 0, dy: 1 };
     } else if (keyName === 'left' || str === 'a' || str === 'A') {
-      if (dir.dx === 0) nextDir = { dx: -1, dy: 0 };
+      req = { dx: -1, dy: 0 };
     } else if (keyName === 'right' || str === 'd' || str === 'D') {
-      if (dir.dx === 0) nextDir = { dx: 1, dy: 0 };
+      req = { dx: 1, dy: 0 };
+    }
+
+    if (!req) return;
+
+    // Compare with the last requested direction in queue, or current dir
+    const lastDir = inputQueue.length > 0 ? inputQueue[inputQueue.length - 1] : dir;
+
+    // Prevent reversing 180° into self or repeating the exact same direction
+    const isReverse = (lastDir.dx + req.dx === 0 && lastDir.dy + req.dy === 0);
+    const isDuplicate = (lastDir.dx === req.dx && lastDir.dy === req.dy);
+
+    if (!isReverse && !isDuplicate && inputQueue.length < 2) {
+      inputQueue.push(req);
     }
   }
 
   // Advance game by one tick
   function update() {
     if (gameOver) return;
-    if (isCountingDown()) return;
+    if (countdown.isActive()) return;
 
-    // Apply buffered direction
-    dir = nextDir;
+    // Dequeue next direction turn
+    if (inputQueue.length > 0) {
+      dir = inputQueue.shift();
+      if (dir.dy !== 0) vTick = 0; // Immediate response on vertical turn
+    }
 
-    // Smooth vertical speed: terminal characters are ~2x taller than wide,
-    // so update vertical movement every 2 ticks to match visual horizontal pace
+    // Terminal characters are ~2x taller than wide: update vertical motion every 2 ticks
     if (dir.dy !== 0) {
       vTick++;
       if (vTick % 2 !== 0) return;
@@ -99,7 +111,7 @@ export function createSnakeGame() {
       vTick = 0;
     }
 
-    // Calculate new head position with border wrapping (toroidal field)
+    // Calculate new head position with toroidal border wrapping
     const newHead = {
       x: (snake[0].x + dir.dx + width) % width,
       y: (snake[0].y + dir.dy + height) % height
@@ -119,76 +131,61 @@ export function createSnakeGame() {
     }
 
     // Check if apple is eaten
-    if (newHead.x === food.x && newHead.y === food.y) {
+    if (food && newHead.x === food.x && newHead.y === food.y) {
       score += 10;
-      snake.unshift(newHead); // Grow snake by not removing tail
-      food = spawnFood();     // Spawn next apple
-      bomb = spawnBomb();     // Relocate bomb to a fresh position
+      snake.unshift(newHead); // Grow snake
+      food = spawnFood();
+      bomb = spawnBomb();
     } else {
       snake.unshift(newHead); // Move head forward
-      snake.pop();            // Remove tail segment
+      snake.pop();            // Remove tail
     }
   }
 
-  // Render the current game frame
+  // Render current frame
   function render() {
-    const grid = [];
-    for (let y = 0; y < height; y++) {
-      grid[y] = new Array(width).fill(' ');
+    const grid = createEmptyGrid(width, height);
+
+    // Draw apple (@) in bright red
+    if (food && food.y >= 0 && food.y < height && food.x >= 0 && food.x < width) {
+      grid[food.y][food.x] = `${C.bold}${C.brightRed}@${C.reset}`;
     }
 
-    // Draw apple (@)
-    if (food.y >= 0 && food.y < height && food.x >= 0 && food.x < width) {
-      grid[food.y][food.x] = '@';
-    }
-
-    // Draw bomb (X)
+    // Draw hazard bomb (X) in high-contrast yellow/red
     if (bomb && bomb.y >= 0 && bomb.y < height && bomb.x >= 0 && bomb.x < width) {
-      grid[bomb.y][bomb.x] = 'X';
+      grid[bomb.y][bomb.x] = `${C.bold}${C.red}X${C.reset}`;
     }
 
-    // Draw snake body (o)
+    // Draw snake body (o) in green
     for (let i = 1; i < snake.length; i++) {
       const seg = snake[i];
       if (seg.y >= 0 && seg.y < height && seg.x >= 0 && seg.x < width) {
-        grid[seg.y][seg.x] = 'o';
+        grid[seg.y][seg.x] = `${C.green}o${C.reset}`;
       }
     }
 
-    // Draw snake head (O)
+    // Draw snake head (O) in bold bright green
     const head = snake[0];
     if (head.y >= 0 && head.y < height && head.x >= 0 && head.x < width) {
-      grid[head.y][head.x] = 'O';
+      grid[head.y][head.x] = `${C.bold}${C.brightGreen}O${C.reset}`;
     }
 
-    // Overlay countdown message if still in ready countdown
+    // Overlay countdown message if still in pre-game countdown
+    countdown.overlay(grid, width, 4);
+
     let statusText = '';
-    if (isCountingDown()) {
-      const remaining = getRemainingSeconds();
-      const message = `Starting in ${remaining}...`;
-      const startCol = Math.floor((width - message.length) / 2);
-      for (let i = 0; i < message.length; i++) {
-        grid[4][startCol + i] = message[i];
-      }
-      statusText = ` Score: 0  |  Starting in ${remaining}...  |  [Q] Menu`;
+    if (countdown.isActive()) {
+      const remaining = countdown.getSecondsRemaining();
+      statusText = ` ${C.yellow}Score: 0${C.reset}  |  ${C.bold}Starting in ${remaining}...${C.reset}  |  ${C.gray}[Q] Menu${C.reset}`;
     } else {
-      statusText = ` Score: ${score}  |  Apple: [@]  Bomb: [X]  |  [ARROWS/WASD] Move  |  [Q] Menu`;
+      statusText = ` ${C.yellow}Score: ${score}${C.reset}  |  ${C.brightRed}[@] Apple${C.reset}  ${C.red}[X] Bomb${C.reset}  |  ${C.brightCyan}[ARROWS/WASD] Move${C.reset}  |  ${C.gray}[Q] Menu${C.reset}`;
     }
 
-    // Add borders
-    const border = '+' + '-'.repeat(width) + '+';
-    const lines = grid.map(row => '|' + row.join('') + '|');
-
-    return [
-      border,
-      ...lines,
-      border,
-      statusText
-    ].join('\n');
+    return wrapFrame(grid, width, statusText, C.cyan);
   }
 
   return {
-    interval: 80, // Fast, responsive tick rate
+    interval: 80, // Responsive tick rate
     handleInput,
     update,
     render,
